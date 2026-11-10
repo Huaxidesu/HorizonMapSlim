@@ -179,6 +179,29 @@ h1 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: .2px; }
 .hint.error { color: var(--danger); }
 .hint.ok { color: var(--ok); }
 
+/* 顶部提示条 ------------------------------------------------------ */
+
+.banner {
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f3f4f6;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.banner.info {
+  background: #fff8e6;
+  border-color: #f0dc9f;
+  color: #7a5b00;
+}
+.banner.error {
+  background: var(--danger-soft);
+  border-color: #f0c9c6;
+  color: var(--danger);
+}
+
 .candidates { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 
 .candidate {

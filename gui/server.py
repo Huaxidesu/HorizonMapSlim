@@ -38,6 +38,12 @@ import gtnh_map_slim  # noqa: E402
 
 BACKUP_MARKERS = gtnh_map_slim.BACKUP_MARKERS
 DEFAULT_PORT = 8777
+# 端口探测范围：从默认端口起向后顺延的端口数量
+PORT_RANGE = 20
+
+# 实际监听端口与运行模式，由 main() 启动时写入，供首页注入使用
+ACTUAL_PORT = DEFAULT_PORT
+NATIVE = False
 
 # 定位拖入目录时跳过的系统目录，避免遍历整盘
 SKIP_DIRS = {
@@ -411,7 +417,10 @@ class Handler(BaseHTTPRequestHandler):
         target = (STATIC / name).resolve()
         if not str(target).startswith(str(STATIC.resolve())) or not target.is_file():
             return self._json({"error": "not found"}, 404)
-        self._send(200, target.read_bytes(), MIME.get(target.suffix, "application/octet-stream"))
+        body = target.read_bytes()
+        if name == "index.html":
+            body = body.replace(b"__APP_CONFIG__", _app_config().encode("ascii"))
+        self._send(200, body, MIME.get(target.suffix, "application/octet-stream"))
 
     # -- 接口实现 ---------------------------------------------------------
 
@@ -485,9 +494,19 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True})
 
 
+def _app_config() -> str:
+    """首页注入的运行时配置，端口顺延与运行模式借此传达给页面。"""
+    return json.dumps({
+        "apiOrigin": f"http://127.0.0.1:{ACTUAL_PORT}",
+        "actualPort": ACTUAL_PORT,
+        "defaultPort": DEFAULT_PORT,
+        "native": NATIVE,
+    })
+
+
 def _free_port(preferred: int) -> int:
     import socket
-    for port in [preferred] + list(range(preferred + 1, preferred + 20)):
+    for port in [preferred] + list(range(preferred + 1, preferred + PORT_RANGE)):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
@@ -495,14 +514,18 @@ def _free_port(preferred: int) -> int:
                 return port
             except OSError:
                 continue
-    raise RuntimeError("找不到可用端口")
+    raise RuntimeError(f"默认端口 {preferred} 起连续 {PORT_RANGE} 个端口均被占用")
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     no_browser = "--no-browser" in argv
     native = "--native" in argv
+
+    global ACTUAL_PORT, NATIVE
     port = _free_port(DEFAULT_PORT)
+    ACTUAL_PORT = port
+    NATIVE = native
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
@@ -510,13 +533,16 @@ def main(argv: list[str] | None = None) -> int:
 
     print("GTNHMapSlim 精简工具")
     print(f"地址: {url}")
+    if port != DEFAULT_PORT:
+        print(f"默认端口 {DEFAULT_PORT} 被占用，已改用 {port}，页面顶部会显示提示。")
 
     if native:
         window = _open_native_window(url)
         if window is not None:
+            webview_mod, win = window
             print("已打开原生窗口，关闭窗口即可退出。")
             threading.Thread(target=server.serve_forever, daemon=True).start()
-            window[0].start()
+            webview_mod.start(_register_native_dnd, win)
             server.shutdown()
             return 0
         print("未检测到 pywebview，改用浏览器模式。")
@@ -537,8 +563,9 @@ def main(argv: list[str] | None = None) -> int:
 def _open_native_window(url: str):
     """创建 pywebview 原生窗口，失败时返回 None 以便回退到浏览器模式。
 
-    原生窗口下拖入文件夹可以获取完整路径（pywebview 会在拖放产生的 File 对象上
-    附加 pywebviewFullPath），这是浏览器模式无法实现的。
+    原生窗口下拖入目录可以获取完整路径，但前提是通过 pywebview 的 DOM 事件
+    接口注册 drop 监听（见 _register_native_dnd），浏览器原生 addEventListener
+    的 drop 事件拿不到该字段。
     """
     try:
         import webview
@@ -555,6 +582,40 @@ def _open_native_window(url: str):
         print(f"创建窗口失败: {type(exc).__name__}: {exc}")
         return None
     return (webview, window)
+
+
+def _register_native_dnd(window) -> None:
+    """在原生窗口注册目录拖放，把完整路径转发给页面。
+
+    pywebview 只有在其 DOM 事件接口注册 drop 监听时，才会在拖入的文件对象上
+    附加 pywebviewFullPath，并把路径经后端捕获。此处于 Python 侧接收事件，
+    再通过 evaluate_js 调用页面的 loadPath 处理路径。
+    """
+    try:
+        from webview.dom import DOMEventHandler
+    except Exception:
+        return
+
+    def on_drop(event: dict) -> None:
+        files = event.get("dataTransfer", {}).get("files", [])
+        if not files:
+            return
+        path = files[0].get("pywebviewFullPath")
+        if not path:
+            return
+        script = "window.loadPath && window.loadPath(" + json.dumps(path) + ")"
+        try:
+            window.evaluate_js(script)
+        except Exception:
+            pass
+
+    try:
+        document = window.dom.document
+        document.events.dragenter += DOMEventHandler(lambda e: None, True, True)
+        document.events.dragover += DOMEventHandler(lambda e: None, True, True, debounce=50)
+        document.events.drop += DOMEventHandler(on_drop, True, True)
+    except Exception as exc:
+        print(f"拖放监听注册失败: {type(exc).__name__}: {exc}")
 
 
 if __name__ == "__main__":

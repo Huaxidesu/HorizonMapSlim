@@ -203,6 +203,15 @@ class ApiTest(unittest.TestCase):
         self.assertIn("GTNHMapSlim", body)
         self.assertIn("/app.js", body)
 
+    def test_config_injection(self):
+        """首页应注入运行时配置，且不残留占位符。"""
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=20) as resp:
+            body = resp.read().decode("utf-8")
+        self.assertNotIn("__APP_CONFIG__", body)
+        self.assertIn("window.APP_CONFIG", body)
+        self.assertIn("apiOrigin", body)
+        self.assertIn("native", body)
+
     def test_discover_endpoint(self):
         data = self.call("/api/discover", {"root": str(self.world)})
         self.assertEqual(data["totals"]["dirs"], 2)

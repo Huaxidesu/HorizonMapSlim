@@ -3,6 +3,13 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
+  var APP_CONFIG = window.APP_CONFIG || {
+    apiOrigin: "",
+    actualPort: 0,
+    defaultPort: 0,
+    native: false
+  };
+
   var state = {
     root: "",
     units: [],
@@ -42,18 +49,63 @@
     return p.length <= max ? p : "…" + p.slice(p.length - max);
   }
 
+  function apiUrl(path) {
+    var origin = APP_CONFIG.apiOrigin || "";
+    // https 页面直连 http 会被浏览器按混合内容拦截，退回同源
+    if (location.protocol === "https:" && origin.indexOf("http://") === 0) origin = "";
+    return origin + path;
+  }
+
+  function readJson(r) {
+    var ct = r.headers.get("Content-Type") || "";
+    if (!r.ok || ct.indexOf("application/json") < 0) {
+      var kind = ct.indexOf("html") >= 0 ? "网页" : "非 JSON 内容";
+      throw new Error("接口返回 " + r.status + " " + kind +
+                      "，请直接用 " + (APP_CONFIG.apiOrigin || location.origin) + "/ 打开本工具");
+    }
+    return r.json();
+  }
+
+  function describeError(err) {
+    var msg = err && err.message ? err.message : "";
+    if (msg.indexOf("fetch") >= 0 || msg.indexOf("Failed") >= 0) {
+      return "无法连接本地服务，请检查 run_gui.bat 窗口是否仍在运行";
+    }
+    return msg;
+  }
+
   function post(path, body) {
-    return fetch(path, {
+    return fetch(apiUrl(path), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body || {})
-    }).then(function (r) { return r.json(); });
+    }).then(readJson);
   }
 
   function hint(text, kind) {
     var el = $("pick-hint");
     el.textContent = text || "";
     el.className = "hint" + (kind ? " " + kind : "");
+  }
+
+  function showBanner(text, kind) {
+    var el = $("banner");
+    el.textContent = text || "";
+    el.className = "banner" + (kind ? " " + kind : "");
+  }
+
+  function checkHealth() {
+    fetch(apiUrl("/api/health")).then(readJson).catch(function () {
+      showBanner("本地服务未响应，请用 " + (APP_CONFIG.apiOrigin || location.origin) + "/ 打开本工具", "error");
+    });
+  }
+
+  function showPortNotice() {
+    if (APP_CONFIG.actualPort && APP_CONFIG.defaultPort &&
+        APP_CONFIG.actualPort !== APP_CONFIG.defaultPort) {
+      showBanner("默认端口 " + APP_CONFIG.defaultPort + " 被占用，已改用 " +
+                 APP_CONFIG.actualPort + "，请收藏当前地址", "info");
+    }
   }
 
   // -- 载入目录 ---------------------------------------------------------
@@ -95,7 +147,7 @@
       updateBackupHint();
       updateRunState();
     }).catch(function (err) {
-      hint("无法连接本地服务：" + err.message, "error");
+      hint(describeError(err), "error");
     });
   }
 
@@ -222,8 +274,11 @@
     });
   }
 
+  var pollFailures = 0;
+
   function poll() {
-    fetch("/api/progress").then(function (r) { return r.json(); }).then(function (s) {
+    fetch(apiUrl("/api/progress")).then(readJson).then(function (s) {
+      pollFailures = 0;
       if (s.state === "idle") return;
       render(s);
       if (s.state !== "running") {
@@ -233,7 +288,16 @@
         updateRunState();
         finishWith(s);
       }
-    }).catch(function () { /* 服务短暂不可用时跳过本次轮询 */ });
+    }).catch(function () {
+      // 服务短暂不可用时跳过本次轮询，连续失败才判定为服务已退出
+      pollFailures += 1;
+      if (pollFailures < 5) return;
+      clearInterval(state.timer);
+      state.timer = null;
+      state.running = false;
+      updateRunState();
+      finishWith({ state: "failed", message: "本地服务已退出，请检查 run_gui.bat 窗口是否仍在运行" });
+    });
   }
 
   function render(s) {
@@ -390,13 +454,15 @@
 
     zone.addEventListener("drop", function (e) {
       e.preventDefault();
-      e.stopPropagation();
       zone.classList.remove("over");
 
+      // 原生窗口由宿主进程注册的拖放监听转发完整路径（见 server.py 的
+      // _register_native_dnd），页面侧不再按名称回退，也不阻止冒泡以免宿主收不到。
+      if (isNative()) return;
+
+      e.stopPropagation();
+
       var file = e.dataTransfer.files && e.dataTransfer.files[0];
-      // 原生窗口宿主（如 pywebview）会附带真实路径，优先使用
-      var full = file && file.pywebviewFullPath;
-      if (full) { loadPath(full); return; }
 
       var name = "";
       var items = e.dataTransfer.items;
@@ -446,7 +512,7 @@
   // -- 绑定 -------------------------------------------------------------
 
   function isNative() {
-    return typeof window.pywebview !== "undefined" && !!window.pywebview.api;
+    return !!APP_CONFIG.native;
   }
 
   function updateDropNote() {
@@ -460,6 +526,8 @@
   function init() {
     bindDrop();
     updateDropNote();
+    checkHealth();
+    showPortNotice();
     window.addEventListener("pywebviewready", updateDropNote);
 
     $("btn-pick").addEventListener("click", function () {
@@ -497,6 +565,8 @@
       post("/api/cancel", {}).then(function () { $("prog-state").textContent = "正在取消…"; });
     });
   }
+
+  window.loadPath = loadPath;
 
   document.addEventListener("DOMContentLoaded", init);
 })();
